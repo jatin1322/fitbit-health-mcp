@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+build/
+.env
+.env.*
+# Exports contain real health data.
+backup*.json
+export*.json
+# Android
+android/local.properties
+android/.gradle/
+android/**/build/
+android/.idea/
+android/.kotlin/
+*.apk
+*.keystore
+*.jks

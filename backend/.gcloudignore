@@ -1,0 +1,12 @@
+# gcloud run deploy --source uploads this directory; keep it small and data-free.
+.gcloudignore
+.venv/
+tests/
+scripts/
+sample_data/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+*.egg-info/
+*.json
+.env*

@@ -1,0 +1,33 @@
+[project]
+name = "fitbit-mcp-backend"
+version = "0.1.0"
+description = "Personal Health Connect ingest API + read-only MCP server"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=2.3,<3",
+    "fastapi>=0.140",
+    "uvicorn>=0.50",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.10",
+    "tzdata",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "httpx>=0.28",
+    "pgserver>=0.1.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app"]
