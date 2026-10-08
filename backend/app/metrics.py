@@ -6,6 +6,7 @@ below them back the MCP tools and never return more than daily aggregates.
 
 import datetime as dt
 import math
+import statistics
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
@@ -169,11 +170,80 @@ def _mean(values: list[int]) -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# Personal baselines ("your normal")
+#
+#   <metric>_30d next to a value: mean of the previous 30 days, excluding that
+#   day, so a value is compared against what came before it. Null when fewer
+#   than 7 of those days have data.
+#   baseline block: mean and typical range (10th-90th percentile) over the 30
+#   days ending today (USER_TZ). Null when fewer than 7 days have data.
+# ---------------------------------------------------------------------------
+
+BASELINE_DAYS = 30
+BASELINE_MIN_DAYS = 7
+
+Series = dict[dt.date, float]
+
+
+def _round(x: float, ndigits: int) -> float | int:
+    return round_half_up(x) if ndigits == 0 else round(x, ndigits)
+
+
+def trailing_mean(series: Series, day: dt.date, ndigits: int = 0) -> float | int | None:
+    lo = day - dt.timedelta(days=BASELINE_DAYS)
+    values = [v for d, v in series.items() if lo <= d < day]
+    if len(values) < BASELINE_MIN_DAYS:
+        return None
+    return _round(sum(values) / len(values), ndigits)
+
+
+def baseline_block(series: Series, today: dt.date, ndigits: int = 0) -> dict | None:
+    lo = today - dt.timedelta(days=BASELINE_DAYS - 1)
+    values = sorted(v for d, v in series.items() if lo <= d <= today)
+    if len(values) < BASELINE_MIN_DAYS:
+        return None
+    deciles = statistics.quantiles(values, n=10, method="inclusive")
+    return {
+        "mean": _round(sum(values) / len(values), ndigits),
+        "typical_low": _round(deciles[0], ndigits),
+        "typical_high": _round(deciles[-1], ndigits),
+        "days_with_data": len(values),
+        "window": f"{lo.isoformat()}..{today.isoformat()}",
+    }
+
+
+def _baseline_range(start: dt.date, end: dt.date, today: dt.date) -> tuple[dt.date, dt.date]:
+    """Dates needed for trailing means over [start, end] and the block ending today."""
+    lo = min(start - dt.timedelta(days=BASELINE_DAYS), today - dt.timedelta(days=BASELINE_DAYS - 1))
+    return lo, max(end, today)
+
+
+def _daily_series(conn: Connection, source: str, col: str, start: dt.date, end: dt.date) -> Series:
+    t = daily_metrics
+    rows = conn.execute(
+        select(t.c.date, t.c[col]).where(and_(t.c.source == source, t.c.date >= start, t.c.date <= end, t.c[col].is_not(None)))
+    )
+    return {d: float(v) for d, v in rows}
+
+
+def _main_sleep_series(conn: Connection, source: str, col: str, start: dt.date, end: dt.date) -> Series:
+    """Minutes per wake date for main nights (naps excluded)."""
+    t = sleep_sessions
+    rows = conn.execute(
+        select(t.c.wake_date, t.c[col]).where(
+            and_(t.c.source == source, t.c.is_main, t.c.wake_date >= start, t.c.wake_date <= end, t.c[col].is_not(None))
+        )
+    )
+    return {d: v / 60 for d, v in rows}
+
+
+# ---------------------------------------------------------------------------
 # Queries (read-only)
 # ---------------------------------------------------------------------------
 
 
-def get_sleep(conn: Connection, source: str, start: dt.date, end: dt.date) -> list[dict]:
+def get_sleep(conn: Connection, source: str, start: dt.date, end: dt.date, today: dt.date) -> list[dict]:
+    asleep_series = _main_sleep_series(conn, source, "asleep_seconds", *_baseline_range(start, end, today))
     t = sleep_sessions
     rows = conn.execute(
         select(t)
@@ -200,12 +270,13 @@ def get_sleep(conn: Connection, source: str, start: dt.date, end: dt.date) -> li
                 "asleep_min": _minutes(r["asleep_seconds"]),
                 "nap": not r["is_main"],
                 "stages": stages,
+                "asleep_30d": trailing_mean(asleep_series, r["wake_date"]) if r["is_main"] else None,
             }
         )
     return out
 
 
-def get_sleep_summary(conn: Connection, source: str, start: dt.date, end: dt.date, days: int) -> dict:
+def get_sleep_summary(conn: Connection, source: str, start: dt.date, end: dt.date, days: int, today: dt.date) -> dict:
     t = sleep_sessions
     rows = list(
         conn.execute(
@@ -228,6 +299,10 @@ def get_sleep_summary(conn: Connection, source: str, start: dt.date, end: dt.dat
         "avg_awake_min": stage_avg("awake_seconds"),
         "min_sleep_min": min(asleep) if asleep else None,
         "max_sleep_min": max(asleep) if asleep else None,
+        "baseline": {
+            name: baseline_block(_main_sleep_series(conn, source, col, *_baseline_range(start, end, today)), today)
+            for name, col in (("asleep_min", "asleep_seconds"), ("deep_min", "deep_seconds"), ("rem_min", "rem_seconds"))
+        },
     }
 
 
@@ -240,7 +315,10 @@ def _daily(conn: Connection, source: str, start: dt.date, end: dt.date, *cols):
     ).mappings()
 
 
-def get_heart_rate_trend(conn: Connection, source: str, start: dt.date, end: dt.date, days: int) -> dict:
+def get_heart_rate_trend(conn: Connection, source: str, start: dt.date, end: dt.date, days: int, today: dt.date) -> dict:
+    rng = _baseline_range(start, end, today)
+    resting = _daily_series(conn, source, "resting_hr", *rng)
+    average = _daily_series(conn, source, "heart_rate_avg", *rng)
     data = []
     for r in _daily(conn, source, start, end, "heart_rate_avg", "heart_rate_min", "heart_rate_max", "resting_hr"):
         item = {
@@ -251,24 +329,31 @@ def get_heart_rate_trend(conn: Connection, source: str, start: dt.date, end: dt.
             "resting": _num(r["resting_hr"]),
         }
         if any(v is not None for k, v in item.items() if k != "date"):
+            item["resting_30d"] = trailing_mean(resting, r["date"])
             data.append(item)
-    return {"days": days, "data": data}
+    return {
+        "days": days,
+        "data": data,
+        "baseline": {"resting": baseline_block(resting, today), "avg": baseline_block(average, today)},
+    }
 
 
-def get_hrv_trend(conn: Connection, source: str, start: dt.date, end: dt.date, days: int) -> dict:
+def get_hrv_trend(conn: Connection, source: str, start: dt.date, end: dt.date, days: int, today: dt.date) -> dict:
+    series = _daily_series(conn, source, "hrv_ms", *_baseline_range(start, end, today))
     data = [
-        {"date": r["date"].isoformat(), "hrv_ms": _num(r["hrv_ms"], 1)}
-        for r in _daily(conn, source, start, end, "hrv_ms")
-        if r["hrv_ms"] is not None
+        {"date": d.isoformat(), "hrv_ms": _num(v, 1), "hrv_30d": trailing_mean(series, d, 1)}
+        for d, v in sorted(series.items())
+        if start <= d <= end
     ]
-    return {"days": days, "data": data}
+    return {"days": days, "data": data, "baseline": {"hrv_ms": baseline_block(series, today, 1)}}
 
 
-def get_activity(conn: Connection, source: str, start: dt.date, end: dt.date) -> dict:
+def get_activity(conn: Connection, source: str, start: dt.date, end: dt.date, today: dt.date) -> dict:
+    steps = _daily_series(conn, source, "steps", *_baseline_range(start, end, today))
     daily = [
-        {"date": r["date"].isoformat(), "steps": r["steps"]}
-        for r in _daily(conn, source, start, end, "steps")
-        if r["steps"] is not None
+        {"date": d.isoformat(), "steps": int(v), "steps_30d": trailing_mean(steps, d)}
+        for d, v in sorted(steps.items())
+        if start <= d <= end
     ]
     t = exercise_sessions
     rows = conn.execute(
@@ -290,7 +375,7 @@ def get_activity(conn: Connection, source: str, start: dt.date, end: dt.date) ->
         }
         for r in rows
     ]
-    return {"daily": daily, "exercise": exercise}
+    return {"daily": daily, "exercise": exercise, "baseline": {"steps": baseline_block(steps, today)}}
 
 
 # A run is "current" if the backend holds complete data through a recent point.

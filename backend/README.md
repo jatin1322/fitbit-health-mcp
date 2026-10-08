@@ -22,7 +22,7 @@ Data is stored in PostgreSQL. Everything is stateless apart from the database, s
 | `app/mcp_server.py` | The six MCP tools, with output schemas. |
 | `scripts/` | `generate_sample.py`, `load_sample.py`, `export.py`, `wipe.py`, `dev_db.py` |
 | `sample_data/` | 60 days of obviously fake data with edge cases. |
-| `tests/` | 84 tests, run against real PostgreSQL. |
+| `tests/` | 86 tests, run against real PostgreSQL. |
 
 ## Local development
 
@@ -100,6 +100,12 @@ The three secrets must all differ, or the app refuses to start. Generate each wi
 **Limits:** dates are `YYYY-MM-DD`, ranges cover at most 365 days, and `days` is 1–365.
 
 **Output:** compact JSON plus a structured output schema. Missing data is omitted or `null`, never 0.
+
+**Personal baselines:** so Claude compares against *your* normal instead of working it out from rows, every tool returns:
+- **`<metric>_30d` next to each value:** the mean of the **previous** 30 days, excluding that day. For example, `resting_30d`, `hrv_30d`, `steps_30d`, and `asleep_30d` (main nights only, never naps).
+- **A `baseline` block:** the 30-day normal ending today (`USER_TZ`). It contains the `mean`, the typical range (`typical_low` and `typical_high`, the 10th and 90th percentiles), `days_with_data` and the `window`.
+- **Covered metrics:** resting and average HR, HRV, asleep/deep/REM minutes, and steps.
+- **Thin history:** both are `null` when fewer than 7 days have data, so a thin baseline never misleads the model.
 
 ## Semantics (`app/metrics.py`)
 

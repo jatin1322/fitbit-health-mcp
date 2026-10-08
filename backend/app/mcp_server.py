@@ -20,6 +20,10 @@ READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotent
 
 INSTRUCTIONS = """Personal, read-only health data synced from Health Connect (Fitbit).
 All values are daily aggregates or per-session summaries; there are no raw samples.
+Compare against the owner's own normal using the provided baselines: each value's
+*_30d field is the mean of the previous 30 days (excluding that day), and each
+tool's `baseline` block gives the 30-day mean and typical range (10th-90th
+percentile) ending today. Baselines are null when fewer than 7 days have data.
 Dates are calendar dates in the owner's home timezone (see get_data_status.user_tz).
 Missing data is omitted or null, never zero. If data looks missing or stale,
 call get_data_status before drawing conclusions."""
@@ -33,6 +37,16 @@ def compact(model: BaseModel) -> CallToolResult:
 
 
 # --- Output models (published as outputSchema) -----------------------------
+
+
+class Baseline(BaseModel):
+    """The owner's normal over the 30 days ending today."""
+
+    mean: int | float
+    typical_low: int | float  # 10th percentile
+    typical_high: int | float  # 90th percentile
+    days_with_data: int
+    window: str  # "YYYY-MM-DD..YYYY-MM-DD"
 
 
 class SleepStages(BaseModel):
@@ -51,6 +65,7 @@ class SleepSession(BaseModel):
     asleep_min: int
     nap: bool
     stages: SleepStages | None
+    asleep_30d: int | None  # main nights only: mean asleep minutes over the previous 30 nights
 
 
 class SleepResult(BaseModel):
@@ -66,6 +81,7 @@ class SleepSummary(BaseModel):
     avg_awake_min: int | None
     min_sleep_min: int | None
     max_sleep_min: int | None
+    baseline: dict[str, Baseline | None]  # asleep_min, deep_min, rem_min (main nights)
 
 
 class HeartRateDay(BaseModel):
@@ -74,26 +90,31 @@ class HeartRateDay(BaseModel):
     min: int | None
     max: int | None
     resting: int | None
+    resting_30d: int | None
 
 
 class HeartRateTrend(BaseModel):
     days: int
     data: list[HeartRateDay]
+    baseline: dict[str, Baseline | None]  # resting, avg
 
 
 class HrvDay(BaseModel):
     date: str
     hrv_ms: float
+    hrv_30d: float | None
 
 
 class HrvTrend(BaseModel):
     days: int
     data: list[HrvDay]
+    baseline: dict[str, Baseline | None]  # hrv_ms
 
 
 class StepsDay(BaseModel):
     date: str
     steps: int
+    steps_30d: int | None
 
 
 class ExerciseSession(BaseModel):
@@ -111,6 +132,7 @@ class ExerciseSession(BaseModel):
 class ActivityResult(BaseModel):
     daily: list[StepsDay]
     exercise: list[ExerciseSession]
+    baseline: dict[str, Baseline | None]  # steps
 
 
 class Coverage(BaseModel):
@@ -184,43 +206,48 @@ def build_mcp(settings: Settings, engine, clock: Callable[[], dt.datetime]) -> M
 
         Each session: wake-up date, start/end with the session's own UTC offset, duration and
         time asleep in minutes, nap flag (only the longest sleep per wake date is the main
-        night), and stage minutes (null when the device recorded no stages)."""
+        night), stage minutes (null when the device recorded no stages), and asleep_30d: the
+        mean minutes asleep over the previous 30 main nights (null for naps / thin history)."""
         start, end = checked(metrics.date_range, start_date, end_date)
-        return compact(SleepResult(sleep=await query(metrics.get_sleep, start, end)))
+        return compact(SleepResult(sleep=await query(metrics.get_sleep, start, end, today())))
 
     @mcp.tool(annotations=READ_ONLY)
     async def get_sleep_summary(days: int = 7) -> Annotated[CallToolResult, SleepSummary]:
         """Averages over main nights (naps excluded) for the last `days` dates ending today (1-365).
 
         Averages are arithmetic means in minutes over nights that have data; `nights` says how
-        many. Stage averages only use nights with stage data."""
+        many. Stage averages only use nights with stage data. `baseline` gives the 30-day normal
+        (mean and typical 10th-90th percentile range) for asleep, deep and REM minutes."""
         start, end = checked(metrics.day_window, today(), days)
-        return compact(SleepSummary(**await query(metrics.get_sleep_summary, start, end, days)))
+        return compact(SleepSummary(**await query(metrics.get_sleep_summary, start, end, days, today())))
 
     @mcp.tool(annotations=READ_ONLY)
     async def get_heart_rate_trend(days: int = 30) -> Annotated[CallToolResult, HeartRateTrend]:
         """Daily heart rate in bpm for the last `days` dates ending today (1-365).
 
-        avg/min/max are over all samples that day; resting is the day's resting heart rate.
-        Days without heart rate data are omitted."""
+        avg/min/max are over all samples that day; resting is the day's resting heart rate;
+        resting_30d is the mean resting HR of the previous 30 days. `baseline` gives the 30-day
+        normal (mean and typical range) for resting and average HR. Days without data are omitted."""
         start, end = checked(metrics.day_window, today(), days)
-        return compact(HeartRateTrend(**await query(metrics.get_heart_rate_trend, start, end, days)))
+        return compact(HeartRateTrend(**await query(metrics.get_heart_rate_trend, start, end, days, today())))
 
     @mcp.tool(annotations=READ_ONLY)
     async def get_hrv_trend(days: int = 30) -> Annotated[CallToolResult, HrvTrend]:
         """Daily heart rate variability (RMSSD, milliseconds, usually one nightly value) for the
-        last `days` dates ending today (1-365). Days without HRV are omitted."""
+        last `days` dates ending today (1-365), each with hrv_30d (mean of the previous 30 days).
+        `baseline` gives the 30-day normal (mean and typical range). Days without HRV are omitted."""
         start, end = checked(metrics.day_window, today(), days)
-        return compact(HrvTrend(**await query(metrics.get_hrv_trend, start, end, days)))
+        return compact(HrvTrend(**await query(metrics.get_hrv_trend, start, end, days, today())))
 
     @mcp.tool(annotations=READ_ONLY)
     async def get_activity(start_date: str, end_date: str) -> Annotated[CallToolResult, ActivityResult]:
         """Daily step totals and exercise sessions for [start_date, end_date] (YYYY-MM-DD, max 365 days).
 
         Exercise sessions include type, duration in minutes, and where recorded: distance in
-        metres, calories (kcal), average/max heart rate (bpm) and steps."""
+        metres, calories (kcal), average/max heart rate (bpm) and steps. Daily rows include
+        steps_30d (mean of the previous 30 days); `baseline` gives the 30-day steps normal."""
         start, end = checked(metrics.date_range, start_date, end_date)
-        return compact(ActivityResult(**await query(metrics.get_activity, start, end)))
+        return compact(ActivityResult(**await query(metrics.get_activity, start, end, today())))
 
     @mcp.tool(annotations=READ_ONLY)
     async def get_data_status() -> Annotated[CallToolResult, DataStatus]:

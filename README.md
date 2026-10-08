@@ -33,6 +33,8 @@ Wearable ─► its app ─► Health Connect ─► Health Sync (Android) ─�
 | `get_activity` | Daily steps, and workouts with distance, calories and heart rate |
 | `get_data_status` | How fresh and complete the data is |
 
+Every value comes with your **personal baseline**: the average of your previous 30 days, plus your typical range. Claude can then say "your HRV was above your normal range" instead of guessing your normal from raw rows.
+
 ## Privacy and security
 
 - **You own every piece.** It runs on your Google Cloud project, your Neon database, your phone and your Claude account. Nothing goes to third parties.
@@ -57,7 +59,7 @@ Follow **[docs/SETUP.md](docs/SETUP.md)** to run your own copy. It takes 1–2 h
 ## Repository layout
 
 ```
-backend/   FastAPI + MCP server, 84 tests (real PostgreSQL), fake sample data, admin scripts
+backend/   FastAPI + MCP server, 86 tests (real PostgreSQL), fake sample data, admin scripts
 android/   sync-core (pure Kotlin sync engine, 40 tests) + app (Health Connect, Compose UI, WorkManager)
 docs/      Setup guide
 ```

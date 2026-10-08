@@ -91,6 +91,7 @@ def test_sleep_summary_math_excludes_naps(client, token):
         "avg_awake_min": None,
         "min_sleep_min": 400,
         "max_sleep_min": 431,
+        "baseline": {"asleep_min": None, "deep_min": None, "rem_min": None},  # < 7 nights of history
     }
 
 
@@ -117,6 +118,7 @@ def test_get_sleep_range_and_fields(client, token):
             "asleep_min": 90,
             "nap": False,
             "stages": {"deep_min": 90, "rem_min": 0, "light_min": 0, "awake_min": 0, "unknown_min": 390},
+            "asleep_30d": None,
         }
     ]
 
@@ -130,9 +132,13 @@ def test_hr_and_hrv_trends_omit_missing_days(client, token):
         ],
     )
     hr, _ = call(client, token, "get_heart_rate_trend", days=30)
-    assert hr == {"days": 30, "data": [{"date": "2026-10-06", "avg": 64, "min": 49, "max": 133, "resting": 57}]}
+    assert hr == {
+        "days": 30,
+        "data": [{"date": "2026-10-06", "avg": 64, "min": 49, "max": 133, "resting": 57, "resting_30d": None}],
+        "baseline": {"resting": None, "avg": None},
+    }
     hrv, _ = call(client, token, "get_hrv_trend", days=30)
-    assert hrv == {"days": 30, "data": [{"date": "2026-10-06", "hrv_ms": 48.3}]}
+    assert hrv == {"days": 30, "data": [{"date": "2026-10-06", "hrv_ms": 48.3, "hrv_30d": None}], "baseline": {"hrv_ms": None}}
 
 
 def test_activity(client, token):
@@ -146,7 +152,7 @@ def test_activity(client, token):
     )
     out, _ = call(client, token, "get_activity", start_date="2026-10-01", end_date="2026-10-07")
     assert out == {
-        "daily": [{"date": "2026-10-07", "steps": 8241}],
+        "daily": [{"date": "2026-10-07", "steps": 8241, "steps_30d": None}],
         "exercise": [
             {
                 "start": "2026-10-07T18:00:00+05:30",
@@ -160,6 +166,7 @@ def test_activity(client, token):
                 "steps": None,
             }
         ],
+        "baseline": {"steps": None},
     }
 
 
@@ -228,3 +235,64 @@ def test_sample_data_end_to_end(client, token):
     assert len(hrv["data"]) == 60 - 3 - 1  # 3 days without HRV; window ends 10-08 (no data yet)
     activity, _ = call(client, token, "get_activity", start_date="2026-08-09", end_date="2026-10-07")
     assert len(activity["daily"]) == 60 and len(activity["exercise"]) == 35
+
+
+# --- personal baselines -------------------------------------------------------------
+
+
+def test_baseline_helpers_are_exclusive_and_need_seven_days():
+    from app.metrics import baseline_block, trailing_mean
+
+    today = dt.date(2026, 10, 8)
+    series = {today - dt.timedelta(days=i): float(i + 1) for i in range(10)}  # today=1, yesterday=2, ...
+    # Previous 30 days exclude today: days 2..10 -> mean 6.
+    assert trailing_mean(series, today) == 6
+    assert trailing_mean({today - dt.timedelta(days=1): 5.0}, today) is None  # 1 day < 7
+    block = baseline_block(series, today, ndigits=1)
+    assert block["mean"] == 5.5 and block["days_with_data"] == 10
+    assert (block["typical_low"], block["typical_high"]) == (1.9, 9.1)  # 10th / 90th percentile
+    assert block["window"] == "2026-09-09..2026-10-08"
+    assert baseline_block({today: 1.0}, today) is None
+
+
+def test_tools_return_values_next_to_personal_baselines(client, token):
+    # 40 days ending yesterday (10-07): resting HR 60, HRV 50.0, steps 8000, nights of 420 min asleep;
+    # then yesterday is an outlier day: resting 70, HRV 30.0, steps 2000, 300 min asleep, plus a nap.
+    last = dt.date(2026, 10, 7)
+    daily, nights = [], []
+    for i in range(40):
+        d = last - dt.timedelta(days=i)
+        outlier = i == 0
+        daily.append(daily_rec(d.isoformat(), steps=2000 if outlier else 8000, resting_hr=70 if outlier else 60,
+                               heart_rate_avg=75, hrv_ms=30.0 if outlier else 50.0))
+        start = dt.datetime.combine(d - dt.timedelta(days=1), dt.time(23, 0))
+        minutes = 300 if outlier else 420
+        nights.append(sleep_rec(f"n{i}", start.isoformat() + "+05:30",
+                                (start + dt.timedelta(minutes=minutes)).isoformat() + "+05:30"))
+    nights.append(sleep_rec("nap", "2026-10-07T14:00:00+05:30", "2026-10-07T14:30:00+05:30"))
+    ingest(client, daily_metrics=daily, sleep=nights)
+
+    hr, _ = call(client, token, "get_heart_rate_trend", days=7)
+    y = next(d for d in hr["data"] if d["date"] == "2026-10-07")
+    assert (y["resting"], y["resting_30d"]) == (70, 60)  # compared with the 30 days before it
+    assert hr["baseline"]["resting"]["mean"] == 60  # (28*60 + 70)/29 -> 60
+    assert hr["baseline"]["resting"]["typical_low"] == 60
+    assert hr["baseline"]["resting"]["days_with_data"] == 29  # window ends today (10-08), data ends 10-07
+
+    hrv, _ = call(client, token, "get_hrv_trend", days=7)
+    y = next(d for d in hrv["data"] if d["date"] == "2026-10-07")
+    assert (y["hrv_ms"], y["hrv_30d"]) == (30.0, 50.0)
+    assert hrv["baseline"]["hrv_ms"]["mean"] == 49.3  # (28*50 + 30)/29
+
+    act, _ = call(client, token, "get_activity", start_date="2026-10-07", end_date="2026-10-07")
+    assert act["daily"] == [{"date": "2026-10-07", "steps": 2000, "steps_30d": 8000}]
+    assert act["baseline"]["steps"]["typical_high"] == 8000
+
+    sleep, _ = call(client, token, "get_sleep", start_date="2026-10-07", end_date="2026-10-07")
+    main = next(s for s in sleep["sleep"] if not s["nap"])
+    nap = next(s for s in sleep["sleep"] if s["nap"])
+    assert (main["asleep_min"], main["asleep_30d"]) == (300, 420)
+    assert nap["asleep_30d"] is None  # naps are not compared with nights
+    summary, _ = call(client, token, "get_sleep_summary", days=7)
+    assert summary["baseline"]["asleep_min"]["mean"] == 416  # (28*420 + 300)/29, naps excluded
+    assert summary["baseline"]["deep_min"] is None  # no stage data recorded
