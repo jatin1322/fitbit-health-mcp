@@ -230,16 +230,23 @@ class SyncEngine(
             for (p in batcher.split(run.id, daily = rows)) upload(run, p)
         }
         if (!run.fullResync) {
-            // Exercise aggregates (HR, steps, distance, calories) often land after the
-            // session record and trigger no change for it, so re-read and resend them.
-            val sessions = LinkedHashMap<String, Session>()
-            var pageToken: String? = null
-            do {
-                val page = hc.readSessions(SessionType.EXERCISE, from.atStartOfDay(z).toInstant(), run.start, pageToken)
-                page.sessions.forEach { sessions[it.id] = it }
-                pageToken = page.nextPageToken
-            } while (!pageToken.isNullOrEmpty())
-            uploadSessions(run, sessions.values.toList(), emptyList())
+            // Re-read recent sessions directly instead of trusting the change log alone:
+            //  - exercise aggregates (HR, steps, distance, calories) often land after the
+            //    session record and trigger no change for it;
+            //  - in practice the Fitbit app rewrites sleep sessions (delete + new id) and
+            //    the rewritten records did not reliably arrive as upsert changes, so sleep
+            //    silently stopped while deletions still came through.
+            // Upserts are idempotent, so re-sending unchanged sessions is harmless.
+            for (type in SessionType.entries) {
+                val sessions = LinkedHashMap<String, Session>()
+                var pageToken: String? = null
+                do {
+                    val page = hc.readSessions(type, from.atStartOfDay(z).toInstant(), run.start, pageToken)
+                    page.sessions.forEach { sessions[it.id] = it }
+                    pageToken = page.nextPageToken
+                } while (!pageToken.isNullOrEmpty())
+                uploadSessions(run, sessions.values.toList(), emptyList())
+            }
         }
     }
 

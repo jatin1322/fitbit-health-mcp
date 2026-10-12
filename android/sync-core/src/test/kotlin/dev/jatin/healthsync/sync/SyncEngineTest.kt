@@ -226,6 +226,21 @@ class SyncEngineTest {
     }
 
     @Test
+    fun `sleep rewritten without an upsert change still syncs via the rolling re-read`() = runTest {
+        val (hc, server, store) = world()
+        engine(hc, server, store, FixedClock(now)).run()
+        // Fitbit-style rewrite: old record deleted (reported), replacement written (not reported).
+        hc.put(sleepSession("sleep-orig", now.minus(Duration.ofHours(30))))
+        engine(hc, server, store, FixedClock(now.plusSeconds(600))).run()
+        hc.remove("sleep-orig")
+        hc.putSilently(sleepSession("sleep-rewritten", now.minus(Duration.ofHours(30))))
+        val out = engine(hc, server, store, FixedClock(now.plusSeconds(1200))).run()
+        assertIs<SyncEngine.Outcome.Ok>(out)
+        assertFalse("sleep-orig" in server.ids("sleep"))
+        assertTrue("sleep-rewritten" in server.ids("sleep"))
+    }
+
+    @Test
     fun `full resync removes rows that no longer exist in Health Connect`() = runTest {
         val (hc, server, store) = world()
         val coordinator = SyncCoordinator(engine(hc, server, store, FixedClock(now)), store)

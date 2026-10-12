@@ -56,6 +56,9 @@ class FakeHealth(
         log += id to true
     }
 
+    /** Write without a change-log entry (an upsert the Changes API failed to report). */
+    fun putSilently(s: Session) { records[s.id] = s }
+
     /** Remove without a change-log entry (e.g. data that aged out / older deletions). */
     fun removeSilently(id: String) { records.remove(id) }
 

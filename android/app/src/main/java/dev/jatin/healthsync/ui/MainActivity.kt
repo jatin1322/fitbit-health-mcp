@@ -151,34 +151,8 @@ private fun Screen(controller: dev.jatin.healthsync.SyncController) {
 
         Section("1. Phone secret") {
             var secret by remember { mutableStateOf("") }
-            Text(if (secretSaved) "Secret saved (encrypted on this device)." else "Paste or type the PHONE_INGEST_SECRET.")
-            OutlinedTextField(
-                value = secret,
-                onValueChange = { secret = it.trim() },
-                label = { Text("Ingest secret") },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            if (BuildConfig.ALLOW_URL_OVERRIDE) {
-                var url by remember { mutableStateOf("") }
-                OutlinedTextField(url, { url = it.trim() }, label = { Text("Debug: backend URL override (https only)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedButton(enabled = !busy, onClick = {
-                    run("Saving URL") {
-                        if (url.isNotEmpty() && !url.startsWith("https://")) "URL must start with https://"
-                        else { controller.secrets.setUrlOverride(url.ifEmpty { null }); "URL saved" }
-                    }
-                }) { Text("Save URL") }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(enabled = !busy && secret.length >= 32, onClick = {
-                    run("Saving secret") {
-                        controller.secrets.save(secret)
-                        secret = ""
-                        "Secret saved"
-                    }
-                }) { Text("Save") }
+            var editing by remember { mutableStateOf(false) }
+            val testButton = @Composable {
                 OutlinedButton(enabled = !busy && secretSaved, onClick = {
                     run("Testing connection") {
                         val r = controller.transport.get("/v1/status")
@@ -189,6 +163,46 @@ private fun Screen(controller: dev.jatin.healthsync.SyncController) {
                         }
                     }
                 }) { Text("Test connection") }
+            }
+            if (secretSaved && !editing) {
+                // Saved: no input box, so it never looks like the app is asking again.
+                Text("✓ Secret saved (encrypted on this device)", fontWeight = FontWeight.Medium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(enabled = !busy, onClick = { editing = true }) { Text("Change secret") }
+                    testButton()
+                }
+            } else {
+                Text(if (secretSaved) "Enter the new secret." else "Paste or type the PHONE_INGEST_SECRET.")
+                OutlinedTextField(
+                    value = secret,
+                    onValueChange = { secret = it.trim() },
+                    label = { Text("Ingest secret") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(enabled = !busy && secret.length >= 32, onClick = {
+                        run("Saving secret") {
+                            controller.secrets.save(secret)
+                            secret = ""
+                            editing = false
+                            "Secret saved"
+                        }
+                    }) { Text("Save") }
+                    if (secretSaved) OutlinedButton(enabled = !busy, onClick = { secret = ""; editing = false }) { Text("Cancel") }
+                }
+            }
+            if (BuildConfig.ALLOW_URL_OVERRIDE) {
+                var url by remember { mutableStateOf("") }
+                OutlinedTextField(url, { url = it.trim() }, label = { Text("Debug: backend URL override (https only)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedButton(enabled = !busy, onClick = {
+                    run("Saving URL") {
+                        if (url.isNotEmpty() && !url.startsWith("https://")) "URL must start with https://"
+                        else { controller.secrets.setUrlOverride(url.ifEmpty { null }); "URL saved" }
+                    }
+                }) { Text("Save URL") }
             }
         }
 
